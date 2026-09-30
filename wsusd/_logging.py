@@ -1,6 +1,13 @@
-import logging as logging
+import logging
 
-logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.INFO)
+LOG_FORMAT = '%(levelname)s: %(message)s'
+
+
+def configure_logging(level=logging.INFO):
+    if not logging.getLogger().handlers:
+        logging.basicConfig(format=LOG_FORMAT, level=level)
+    else:
+        logging.getLogger().setLevel(level)
 
 
 def get_logger(name):
@@ -9,3 +16,4 @@ def get_logger(name):
 
 def set_debug_level(logger):
     logger.setLevel(logging.DEBUG)
+

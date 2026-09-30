@@ -123,9 +123,40 @@ class WSUSpwExpander:
         return nrow_before, nrow_after
 
     def _expand_data_description(self):
-        nrow_before, nrow_after = self.__expand_subtable('DATA_DESCRIPTION')
-        self.extra_dd = list(range(nrow_before, nrow_after))
-        assert len(self.extra_dd) == len(self.extra_spw)
+        full_table_name = os.path.join(self.vis, 'DATA_DESCRIPTION')
+        self.dd_pairs: list[tuple[int, int, int, int]] = []
+        with sdutil.table_manager(full_table_name, nomodify=False) as tb:
+            for base_spw, new_spw in zip(self.target_spws, self.extra_spw):
+                logger.info(
+                    'duplicating DATA_DESCRIPTION rows for spw %d: spw %d will be assigned',
+                    base_spw,
+                    new_spw,
+                )
+                self.__remove_preexisting_rows(tb, new_spw)
+
+                taql = f'SPECTRAL_WINDOW_ID == {base_spw}'
+                selected = tb.query(taql)
+                try:
+                    base_dds = [int(r) for r in selected.rownumbers()]
+                    if len(base_dds) == 0:
+                        logger.warning('No DATA_DESCRIPTION row found for SPW %d', base_spw)
+                        continue
+
+                    startrow = tb.nrows()
+                    selected.copyrows(tb.name())
+                    nrow = tb.nrows() - startrow
+                    spwcol = np.zeros(nrow, dtype=int) + new_spw
+                    tb.putcol('SPECTRAL_WINDOW_ID', spwcol, startrow, nrow)
+
+                    new_dds = list(range(startrow, startrow + nrow))
+                    for base_dd, new_dd in zip(base_dds, new_dds):
+                        self.dd_pairs.append((base_spw, new_spw, base_dd, new_dd))
+
+                    self.spw_dd_map[new_spw] = new_dds
+                finally:
+                    selected.close()
+
+        self.extra_dd = [new_dd for _, _, _, new_dd in self.dd_pairs]
 
     def _expand_syscal(self):
         self.__expand_subtable('SYSCAL')
@@ -139,21 +170,22 @@ class WSUSpwExpander:
     def _expand_main(self):
         table_name = self.vis
         with sdutil.table_manager(table_name, nomodify=False) as tb:
-            _iterator = zip(self.target_spws, self.extra_spw, self.extra_dd)
-            for base_spw, new_spw, new_dd in _iterator:
-                # here we assume spw-dd mapping is one-to-one
-                # (mapping is one-to-many in general)
-                base_dd = self.spw_dd_map[base_spw][0]
-                logger.info(f'duplicating MAIN rows for dd {base_dd} '
-                            f'(spw {base_spw}): '
-                            f'dd {new_dd} (spw {new_spw}) will be assigned')
+            for base_spw, new_spw, base_dd, new_dd in self.dd_pairs:
+                logger.info(
+                    'duplicating MAIN rows for dd %d (spw %d): dd %d (spw %d) will be assigned',
+                    base_dd,
+                    base_spw,
+                    new_dd,
+                    new_spw,
+                )
 
                 startrow = tb.nrows()
                 taql = f'DATA_DESC_ID == {base_dd}'
                 self.__copy_selected_rows(tb, taql)
                 nrow = tb.nrows() - startrow
-                ddcol = np.zeros(nrow, dtype=int) + new_dd
-                tb.putcol('DATA_DESC_ID', ddcol, startrow, nrow)
+                if nrow > 0:
+                    ddcol = np.zeros(nrow, dtype=int) + new_dd
+                    tb.putcol('DATA_DESC_ID', ddcol, startrow, nrow)
 
     def _duplicate(self):
         # duplicate science & atm spws

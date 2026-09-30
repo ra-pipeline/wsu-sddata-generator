@@ -10,8 +10,8 @@ name = "wsu-sddata-generator"
 version = "1.0.0"
 description = "Data Generator for ALMA-WSU SD."
 readme = "README.md"
-requires-python = ">=3.8"
-authors = [ { name = "Unknown" } ]
+requires-python = ">=3.12"
+authors = [ { name = "Takeshi Nakazato" } ]
 license = { text = "UNKNOWN" }
 
 dependencies = [
@@ -26,6 +26,9 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
 ]
+
+[project.urls]
+"Upstream Repository" = "https://github.com/tnakazato/wsu-sddata-generator"
 
 [project.scripts]
 wsusd = "wsusd.__main__:main"
@@ -45,7 +48,25 @@ profile = "black"
 minversion = "6.0"
 addopts = "-q"
 python_files = ["test_*.py"]
+norecursedirs = [".*", "build", "dist", "*.egg-info", "scripts", "working", ".venv"]
 
 [tool.flake8]
 max-line-length = 88
 extend-ignore = ["E203"]
+
+[dependency-groups]
+dev = [
+    "pytest>=6.0",
+]
+
+[[tool.uv.index]]
+name = "nrao"
+url = "https://casa-pip.nrao.edu/repository/pypi-group/simple"
+explicit = true
+
+[tool.uv.sources]
+casatools = { index = "nrao" }
+casatasks = { index = "nrao" }
+
+[tool.uv]
+link-mode = "copy"

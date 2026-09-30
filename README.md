@@ -1,5 +1,7 @@
 # WSU-SD Data Generator
 
+> **Credits & Upstream Origins**: This project is a fork of [wsu-sddata-generator](https://github.com/tnakazato/wsu-sddata-generator), created and authored by **Takeshi Nakazato ([@tnakazato](https://github.com/tnakazato))** at the National Astronomical Observatory of Japan (NAOJ). Full credit to Takeshi Nakazato for designing and implementing the foundational ALMA-WSU Single Dish data generator.
+
 Data Generator for ALMA-WSU SD.
 
 ## Installation

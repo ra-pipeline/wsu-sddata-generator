@@ -1,0 +1,37 @@
+[project]
+site_name = "WSU-SD Data Generator"
+site_description = "Data Generator for ALMA-WSU SD"
+docs_dir = "docs"
+site_dir = "site"
+
+nav = [
+    { "Overview" = "index.md" },
+    { "Quickstart" = "quickstart.md" },
+    { "Design" = "design.md" },
+    { "CLI Reference" = "cli.md" },
+]
+
+[project.theme]
+name = "material"
+language = "en"
+features = [
+    "navigation.tabs",
+    "navigation.sections",
+    "navigation.expand",
+    "navigation.top",
+    "navigation.tracking",
+    "navigation.indexes",
+    "content.code.copy",
+    "content.action.edit",
+    "search.suggest",
+    "search.highlight",
+    "search.share",
+]
+
+[project.theme.palette]
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+
+[project.extra]
+generator = false
