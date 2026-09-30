@@ -1,6 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
 import functools
 import os
+import queue
 import shutil
+import threading
 
 import numpy as np
 import scipy
@@ -50,22 +53,48 @@ def robust_stddev(data, clipthresh=3, clipniter=3):
     return stddev
 
 
-def interpolate_data(data_in, cf_in, cf_out, sigma=2, robust=True):
-    """Interpolates data onto a new frequency grid with added noise.
+DEFAULT_NUM_THREADS = min(os.cpu_count() or 4, 4)
+_EXECUTOR: ThreadPoolExecutor | None = None
 
-    Performs Gaussian smoothing, interpolation, and re-addition of noise based on
-    residuals from the smoothing process.
 
-    Args:
-        data_in: Input data array with shape (npol, nchan, nrow)
-        cf_in: Input channel frequencies.
-        cf_out: Output channel frequencies.
-        sigma: Standard deviation for the Gaussian kernel.
-        robust: If True, use robust stddev estimation for noise addition (slower).
+def get_executor(max_workers: int | None = None) -> ThreadPoolExecutor:
+    """Return a shared ThreadPoolExecutor instance."""
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        if max_workers is None:
+            max_workers = int(
+                os.environ.get('WSUSD_NUM_THREADS', DEFAULT_NUM_THREADS)
+            )
+        _EXECUTOR = ThreadPoolExecutor(max_workers=max_workers)
+    return _EXECUTOR
 
-    Returns:
-        Interpolated data array with shape (npol, nchan_out, nrow).
-    """
+
+def prefetch(iterable, maxsize: int = 1):
+    """Prefetch items from an iterable in a background thread."""
+    q: queue.Queue = queue.Queue(maxsize=maxsize)
+    sentinel = object()
+
+    def producer():
+        try:
+            for item in iterable:
+                q.put(item)
+            q.put(sentinel)
+        except Exception as e:
+            q.put(e)
+
+    t = threading.Thread(target=producer, daemon=True)
+    t.start()
+
+    while True:
+        item = q.get()
+        if item is sentinel:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
+def _interpolate_data_core(data_in, cf_in, cf_out, sigma=2, robust=True):
     # data.shape should be (npol, nchan, nrow) in F-order in memory per casatools output convention.
     assert len(data_in.shape) == 3
     assert len(cf_in.shape) == 1
@@ -113,6 +142,47 @@ def interpolate_data(data_in, cf_in, cf_out, sigma=2, robust=True):
 
     # Reshape back to (npol, nchan_out, nrow)
     return corrupted_flat.reshape(npol, nrow, nchan_out).transpose(0, 2, 1)
+
+
+def interpolate_data(data_in, cf_in, cf_out, sigma=2, robust=True, num_threads=None):
+    """Interpolates data onto a new frequency grid with added noise.
+
+    Performs Gaussian smoothing, interpolation, and re-addition of noise based on
+    residuals from the smoothing process. Slices large row chunks across worker
+    threads for concurrent multi-core computation.
+
+    Args:
+        data_in: Input data array with shape (npol, nchan, nrow)
+        cf_in: Input channel frequencies.
+        cf_out: Output channel frequencies.
+        sigma: Standard deviation for the Gaussian kernel.
+        robust: If True, use robust stddev estimation for noise addition (slower).
+        num_threads: Number of worker threads. If None, reads WSUSD_NUM_THREADS.
+
+    Returns:
+        Interpolated data array with shape (npol, nchan_out, nrow).
+    """
+    npol, nchan_in, nrow = data_in.shape
+    if num_threads is None:
+        num_threads = int(os.environ.get('WSUSD_NUM_THREADS', DEFAULT_NUM_THREADS))
+
+    if num_threads <= 1 or nrow < 1000:
+        return _interpolate_data_core(data_in, cf_in, cf_out, sigma=sigma, robust=robust)
+
+    starts = [i * (nrow // num_threads) + min(i, nrow % num_threads) for i in range(num_threads + 1)]
+    slices = [slice(starts[i], starts[i + 1]) for i in range(num_threads) if starts[i] < starts[i + 1]]
+
+    pool = get_executor(num_threads)
+
+    def _worker(slc):
+        return slc, _interpolate_data_core(
+            data_in[:, :, slc], cf_in, cf_out, sigma=sigma, robust=robust
+        )
+
+    out = np.empty((npol, len(cf_out), nrow), dtype=data_in.dtype)
+    for slc, res in pool.map(_worker, slices):
+        out[:, :, slc] = res
+    return out
 
 
 def interpolate_bool(data_in, cf_in, cf_out):
@@ -504,10 +574,16 @@ class MainUpdater(TableUpdater):
         self.dd_entries = []
         self.ddid = {}
         spw_ddid_map = get_spw_dd_map(self.vis)
+
+        # Pre-filter to only DDIDs that actually contain rows in the MAIN table
+        with sdutil.table_manager(self.vis) as tb:
+            active_ddids = set(np.unique(tb.getcol('DATA_DESC_ID'))) if tb.nrows() > 0 else set()
+
         for spw, ddids in sorted(spw_ddid_map.items()):
-            if len(ddids) > 0 and spw not in self.ddid:
-                self.ddid[spw] = ddids[0]
-            for ddid in ddids:
+            active_spw_ddids = [d for d in ddids if d in active_ddids] if active_ddids else ddids
+            if len(active_spw_ddids) > 0 and spw not in self.ddid:
+                self.ddid[spw] = active_spw_ddids[0]
+            for ddid in active_spw_ddids:
                 self.dd_entries.append((spw, ddid))
         self.all_spws = sorted(self.ddid.keys())
 
@@ -521,32 +597,38 @@ class MainUpdater(TableUpdater):
             os.environ.get('WSUSD_NROW_CHUNK', DEFAULT_NROW_CHUNK)
         )
 
-        taql = self.taql(ddid)
-        with sdutil.table_selector(self.vis, taql) as tb:
-            nrow = tb.nrows()
-            nchunk = nrow // nrow_chunk_default
-            nmod = nrow % nrow_chunk_default
-            chunk_list = [nrow_chunk_default] * nchunk
-            if nmod > 0:
-                chunk_list.append(nmod)
+        def _reader():
+            taql = self.taql(ddid)
+            with sdutil.table_selector(self.vis, taql) as tb:
+                nrow = tb.nrows()
+                if nrow == 0:
+                    return
 
-            chunk_start = 0
-            for i, nrow_chunk in enumerate(chunk_list):
-                logger.info(
-                    'spw %d (ddid %d): start reading chunk %d', spw, ddid, i
-                )
+                nchunk = nrow // nrow_chunk_default
+                nmod = nrow % nrow_chunk_default
+                chunk_list = [nrow_chunk_default] * nchunk
+                if nmod > 0:
+                    chunk_list.append(nmod)
 
-                data_in = dict(
-                    (name, tb.getcol(name, chunk_start, nrow_chunk))
-                    for name in self.columns
-                )
+                chunk_start = 0
+                for i, nrow_chunk in enumerate(chunk_list):
+                    logger.info(
+                        'spw %d (ddid %d): start reading chunk %d', spw, ddid, i
+                    )
 
-                yield chunk_start, nrow_chunk, data_in
+                    data_in = dict(
+                        (name, tb.getcol(name, chunk_start, nrow_chunk))
+                        for name in self.columns
+                    )
 
-                logger.info(
-                    'spw %d (ddid %d): done reading chunk %d', spw, ddid, i
-                )
-                chunk_start += nrow_chunk
+                    yield chunk_start, nrow_chunk, data_in
+
+                    logger.info(
+                        'spw %d (ddid %d): done reading chunk %d', spw, ddid, i
+                    )
+                    chunk_start += nrow_chunk
+
+        return prefetch(_reader(), maxsize=1)
 
     def _get_chunk_updater(self, spw):
         if spw in self.target_spws:
