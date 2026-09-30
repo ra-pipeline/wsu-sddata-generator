@@ -22,16 +22,31 @@ def gauss_normalized(n, sigma):
 
 
 def robust_stddev(data, clipthresh=3, clipniter=3):
-    # compute robust stddev using n-sigma clipping
-    mask = np.zeros(len(data), dtype=bool)
-    stddev = np.nan
-    for _ in range(clipniter + 1):
-        marr = np.ma.masked_array(data, mask)
-        stddev = np.ma.std(marr)
-        thresh = stddev * clipthresh
-        _m = np.abs(data) > thresh
-        mask = np.logical_or(mask, _m)
+    """Compute robust stddev using n-sigma clipping.
 
+    Supports both 1D arrays (single spectrum) and 2D arrays (M rows x N channels).
+    Vectorized across all rows for high performance.
+    """
+    arr = np.asarray(data)
+    if arr.ndim == 1:
+        mask = np.zeros(len(arr), dtype=bool)
+        for _ in range(clipniter + 1):
+            counts = max(int(np.sum(~mask)), 1)
+            mean = np.sum(np.where(mask, 0.0, arr)) / counts
+            var = np.sum(np.where(mask, 0.0, np.abs(arr - mean) ** 2)) / counts
+            stddev = float(np.sqrt(var))
+            thresh = stddev * clipthresh
+            mask |= np.abs(arr) > thresh
+        return stddev
+
+    mask = np.zeros_like(arr, dtype=bool)
+    for _ in range(clipniter + 1):
+        counts = np.maximum(np.sum(~mask, axis=1, keepdims=True), 1)
+        mean = np.sum(np.where(mask, 0.0, arr), axis=1, keepdims=True) / counts
+        var = np.sum(np.where(mask, 0.0, np.abs(arr - mean) ** 2), axis=1, keepdims=True) / counts
+        stddev = np.sqrt(var)
+        thresh = stddev * clipthresh
+        mask |= np.abs(arr) > thresh
     return stddev
 
 
@@ -84,7 +99,7 @@ def interpolate_data(data_in, cf_in, cf_out, sigma=2, robust=True):
     # Add noise vectorized
     diff_flat = data_flat - smoothed_flat
     if robust:
-        noise_std = np.apply_along_axis(robust_stddev, 1, diff_flat).reshape(-1, 1)
+        noise_std = robust_stddev(diff_flat)
         noise_std_native = np.std(diff_flat, axis=1, keepdims=True)
         logger.debug(
             'native std %s robust std %s (channel-wise noise - median over chunk)',
@@ -101,30 +116,22 @@ def interpolate_data(data_in, cf_in, cf_out, sigma=2, robust=True):
 
 
 def interpolate_bool(data_in, cf_in, cf_out):
-    # data.shape should be (npol, nchan, nrow)
-    assert len(data_in.shape) == 3
+    """Nearest-neighbor channel interpolation for boolean flag arrays.
 
-    # channel frequencies should be one-dimensional array
+    Vectorized across all rows and polarizations simultaneously.
+    """
+    assert len(data_in.shape) == 3
     assert len(cf_in.shape) == 1
     assert len(cf_out.shape) == 1
 
-    npol, _, nrow = data_in.shape
-    nchan = len(cf_out)
+    indices = np.searchsorted(cf_in, cf_out)
+    indices = np.clip(indices, 0, len(cf_in) - 1)
+    left_indices = np.maximum(indices - 1, 0)
+    dist_right = np.abs(cf_in[indices] - cf_out)
+    dist_left = np.abs(cf_in[left_indices] - cf_out)
+    nearest_idx = np.where(dist_left <= dist_right, left_indices, indices)
 
-    data_out = np.zeros((npol, nchan, nrow), dtype=data_in.dtype)
-    for ipol in range(npol):
-        for irow in range(nrow):
-            _data_in = data_in[ipol, :, irow]
-            obj = scipy.interpolate.interp1d(
-                cf_in,
-                _data_in,
-                kind='nearest',
-                bounds_error=False,
-                fill_value=(_data_in[0], _data_in[-1])
-            )
-            data_out[ipol, :, irow] = np.array(obj(cf_out), dtype=bool)
-
-    return data_out
+    return data_in[:, nearest_idx, :]
 
 
 class TableUpdater:
@@ -392,6 +399,14 @@ class ChunkInterpolator:
         self.cf_in = cf_in
         self.cf_out = cf_out
 
+        # Precompute nearest channel indices for FLAG interpolation
+        indices = np.searchsorted(cf_in, cf_out)
+        indices = np.clip(indices, 0, len(cf_in) - 1)
+        left_indices = np.maximum(indices - 1, 0)
+        dist_right = np.abs(cf_in[indices] - cf_out)
+        dist_left = np.abs(cf_in[left_indices] - cf_out)
+        self.nearest_flag_idx = np.where(dist_left <= dist_right, left_indices, indices)
+
     def __scale_data(self, data_in, factor):
         # shape of data_in should be (npol, nchan, nrow)
         assert len(data_in.shape) == 3
@@ -432,9 +447,8 @@ class ChunkInterpolator:
 
         # update FLAG
         column = 'FLAG'
-        data_out[column] = interpolate_bool(
-            data_in[column], self.cf_in, self.cf_out
-        )
+        if column in data_in:
+            data_out[column] = data_in[column][:, self.nearest_flag_idx, :]
 
         # update WEIGHT_SPECTRUM
         column = 'WEIGHT_SPECTRUM'
@@ -447,6 +461,9 @@ class ChunkInterpolator:
             data_out[column] = self.__update_sigma_spectrum(data_in[column])
 
         return chunk_start, nrow_chunk, data_out
+
+
+DEFAULT_NROW_CHUNK = 10000
 
 
 class MainUpdater(TableUpdater):
@@ -494,11 +511,15 @@ class MainUpdater(TableUpdater):
                 self.dd_entries.append((spw, ddid))
         self.all_spws = sorted(self.ddid.keys())
 
-        self.tmp_vis = f'genwsusd.{vis}.tmp'
-        self.backup_vis = f'genwsusd.{vis}.bak'
+        vis_dir = os.path.dirname(vis)
+        vis_base = os.path.basename(vis)
+        self.tmp_vis = os.path.join(vis_dir, f'genwsusd.{vis_base}.tmp')
+        self.backup_vis = os.path.join(vis_dir, f'genwsusd.{vis_base}.bak')
 
     def _read_main(self, spw, ddid):
-        nrow_chunk_default = 100
+        nrow_chunk_default = int(
+            os.environ.get('WSUSD_NROW_CHUNK', DEFAULT_NROW_CHUNK)
+        )
 
         taql = self.taql(ddid)
         with sdutil.table_selector(self.vis, taql) as tb:
@@ -554,25 +575,25 @@ class MainUpdater(TableUpdater):
 
     def flush(self):
         # flush to the disk
-        for (spw, ddid), update_gen in zip(self.dd_entries, self.update_generators):
-            logger.debug('spw %d (ddid %d): generator %s', spw, ddid, update_gen)
-            taql = self.taql(ddid)
-            with sdutil.table_selector(
-                self.tmp_vis, taql, nomodify=False
-            ) as tb:
-                for i, (chunk_start, nrow_chunk, data_out) in enumerate(update_gen):
-                    logger.info(
-                        'spw %d (ddid %d): start writing chunk %d', spw, ddid, i
-                    )
-                    for column, chunk in data_out.items():
-                        tb.putcol(column, chunk, chunk_start, nrow_chunk)
-
-                    logger.info(
-                        'spw %d (ddid %d): done writing chunk %d', spw, ddid, i
-                    )
-
-        # finalization
         try:
+            for (spw, ddid), update_gen in zip(self.dd_entries, self.update_generators):
+                logger.debug('spw %d (ddid %d): generator %s', spw, ddid, update_gen)
+                taql = self.taql(ddid)
+                with sdutil.table_selector(
+                    self.tmp_vis, taql, nomodify=False
+                ) as tb:
+                    for i, (chunk_start, nrow_chunk, data_out) in enumerate(update_gen):
+                        logger.info(
+                            'spw %d (ddid %d): start writing chunk %d', spw, ddid, i
+                        )
+                        for column, chunk in data_out.items():
+                            tb.putcol(column, chunk, chunk_start, nrow_chunk)
+
+                        logger.info(
+                            'spw %d (ddid %d): done writing chunk %d', spw, ddid, i
+                        )
+
+            # finalization
             rename_table(self.vis, self.backup_vis)
             try:
                 rename_table(self.tmp_vis, self.vis)
@@ -589,7 +610,7 @@ class MainUpdater(TableUpdater):
             if os.path.exists(self.tmp_vis):
                 shutil.rmtree(self.tmp_vis)
             logger.error(
-                'Error during table swapping. Original MS preserved if backup restoration succeeded.'
+                'Error during processing or table swapping. Original MS preserved if backup restoration succeeded.'
             )
             raise
         finally:
