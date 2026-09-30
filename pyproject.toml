@@ -65,7 +65,10 @@ url = "https://casa-pip.nrao.edu/repository/pypi-group/simple"
 explicit = true
 
 [tool.uv.sources]
-casatools = { index = "nrao" }
+casatools = [
+    { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "nrao", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
+]
 casatasks = { index = "nrao" }
 
 [tool.uv]

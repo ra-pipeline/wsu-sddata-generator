@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = ">=3.12"
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "platform_machine != 'x86_64' or sys_platform != 'linux'",
+]
 
 [[package]]
 name = "casaconfig"
@@ -19,7 +23,8 @@ name = "casatasks"
 version = "6.7.7.10"
 source = { registry = "https://casa-pip.nrao.edu/repository/pypi-group/simple" }
 dependencies = [
-    { name = "casatools" },
+    { name = "casatools", version = "6.7.7.10", source = { registry = "https://casa-pip.nrao.edu/repository/pypi-group/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "casatools", version = "6.7.7.10", source = { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "certifi" },
     { name = "matplotlib" },
     { name = "pyerfa" },
@@ -33,9 +38,12 @@ wheels = [
 name = "casatools"
 version = "6.7.7.10"
 source = { registry = "https://casa-pip.nrao.edu/repository/pypi-group/simple" }
+resolution-markers = [
+    "platform_machine != 'x86_64' or sys_platform != 'linux'",
+]
 dependencies = [
-    { name = "casaconfig" },
-    { name = "numpy" },
+    { name = "casaconfig", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "numpy", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
 ]
 wheels = [
     { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:85cfb71df611c010c3a52fad2cb1f8378f0131523f615dcd1aeabb98fa1a213b" },
@@ -44,6 +52,27 @@ wheels = [
     { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:7ad9ce9804c9373621c4721700f1589523b3a67f732229a56a960d02a18df459" },
     { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:f743c1ca3e1847adb839b60380f1fcd6f613311ea24c0125304aca6a319740d1" },
     { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:3b47cdfdb5458d2eda6dce10c50dfdc6df4fd5289b0b3a843c9642ed30ccacd9" },
+]
+
+[[package]]
+name = "casatools"
+version = "6.7.7.10"
+source = { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_28_x86_64.whl" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "casaconfig", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:38fb9fd1175e53530e33544d0ece23868a793eb95412d82870a09ab2b19d9cc0" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "casaconfig" },
+    { name = "numpy" },
 ]
 
 [[package]]
@@ -702,7 +731,8 @@ version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "casatasks" },
-    { name = "casatools" },
+    { name = "casatools", version = "6.7.7.10", source = { registry = "https://casa-pip.nrao.edu/repository/pypi-group/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "casatools", version = "6.7.7.10", source = { url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "numpy" },
     { name = "scipy" },
 ]
@@ -715,7 +745,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "casatasks", index = "https://casa-pip.nrao.edu/repository/pypi-group/simple" },
-    { name = "casatools", index = "https://casa-pip.nrao.edu/repository/pypi-group/simple" },
+    { name = "casatools", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", index = "https://casa-pip.nrao.edu/repository/pypi-group/simple" },
+    { name = "casatools", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://casa-pip.nrao.edu/repository/pypi-group/packages/casatools/6.7.7.10/casatools-6.7.7.10-cp312-cp312-manylinux_2_28_x86_64.whl" },
     { name = "numpy" },
     { name = "scipy" },
 ]
