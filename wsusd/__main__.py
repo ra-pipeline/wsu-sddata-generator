@@ -2,7 +2,7 @@ import argparse
 import os
 import shutil
 
-from wsusd._logging import get_logger, set_debug_level
+from wsusd._logging import configure_logging, get_logger, set_debug_level
 from wsusd.asdm2ms import is_asdm, run_importasdm
 from wsusd.generator.channel import WSUChannelExpander
 from wsusd.generator.spw import WSUSpwExpander
@@ -73,7 +73,7 @@ def parse_args():
 
 
 def generate_ms_name(asdm, chan_factor, spw_factor):
-    logger.debug('%s, %s' % (asdm, type(asdm)))
+    logger.debug('%s, %s', asdm, type(asdm))
     asdm_basename = os.path.basename(asdm.rstrip('/'))
     basename = asdm_basename
 
@@ -135,6 +135,8 @@ def generate(asdm, chan_factor, spw_factor, backup_ms=False, dry_run=False):
 
 
 def main():
+    configure_logging()
+
     # parse user inputs
     args = parse_args()
 

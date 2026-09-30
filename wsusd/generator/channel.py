@@ -1,18 +1,20 @@
 import functools
-import numpy as np
 import os
-import scipy
 import shutil
 
+import numpy as np
+import scipy
 from casatasks.private import sdutil
+from scipy.ndimage import convolve1d
 
 from wsusd._logging import get_logger
 from wsusd.generator.util import get_spw_dd_map, get_target_spws
 
+
 logger = get_logger(__name__)
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def gauss_normalized(n, sigma):
     gauss = scipy.signal.windows.gaussian(n, sigma)
     gauss /= gauss.sum()
@@ -33,75 +35,69 @@ def robust_stddev(data, clipthresh=3, clipniter=3):
     return stddev
 
 
-def add_noise(data, noise_stddev):
-    generator = np.random.default_rng()
-    noise = generator.normal(0, noise_stddev, len(data))
-    return data + noise
+def interpolate_data(data_in, cf_in, cf_out, sigma=2, robust=True):
+    """Interpolates data onto a new frequency grid with added noise.
 
+    Performs Gaussian smoothing, interpolation, and re-addition of noise based on
+    residuals from the smoothing process.
 
-def interpolate_data_single(data, cf_in, cf_out, sigma=2):
-    # data should be one dimensional
-    assert len(data.shape) == 1
+    Args:
+        data_in: Input data array with shape (npol, nchan, nrow)
+        cf_in: Input channel frequencies.
+        cf_out: Output channel frequencies.
+        sigma: Standard deviation for the Gaussian kernel.
+        robust: If True, use robust stddev estimation for noise addition (slower).
 
-    # nchan should be equal to len(cf_in)
-    assert len(data) == len(cf_in)
-
-    nchan = len(data)
-    n = min(nchan, sigma * 10)
-    gauss = gauss_normalized(n, sigma)
-
-    smoothed = np.convolve(data, gauss, mode='same')
-
-    _interpolator = scipy.interpolate.interp1d(
-        cf_in,
-        smoothed,
-        bounds_error=False,
-        fill_value=(smoothed[0], smoothed[-1])
-    )
-    interpolated = _interpolator(cf_out)
-
-    diff = data - smoothed
-    noise_std = robust_stddev(diff, clipthresh=3, clipniter=3)
-    logger.debug(f'native std {diff.std()} robust std {noise_std}')
-    corrupted = add_noise(interpolated, noise_std)
-
-    noise_in = data - smoothed
-    logger.debug(
-        f'noise(in) {noise_in[:5]} mean {noise_in.mean()} '
-        f'std {noise_in.std()} med {np.median(noise_in)}'
-    )
-    noise = corrupted - interpolated
-    logger.debug(
-        f'noise(out) {noise[:5]} mean {noise.mean()} '
-        f'std {noise.std()} med {np.median(noise)}'
-    )
-
-    return corrupted
-
-
-def interpolate_data(data_in, cf_in, cf_out, sigma=2):
-    # data.shape should be (npol, nchan, nrow)
+    Returns:
+        Interpolated data array with shape (npol, nchan_out, nrow).
+    """
+    # data.shape should be (npol, nchan, nrow) in F-order in memory per casatools output convention.
     assert len(data_in.shape) == 3
-
-    # channel frequencies should be one-dimensional array
     assert len(cf_in.shape) == 1
     assert len(cf_out.shape) == 1
 
-    npol, _, nrow = data_in.shape
-    nchan = len(cf_out)
+    npol, nchan_in, nrow = data_in.shape
+    nchan_out = len(cf_out)
 
-    logger.debug(f'cf_in.shape = {cf_in.shape}')
-    logger.debug(f'cf_out.shape = {cf_out.shape}')
-    logger.debug(f'data.shape = {data_in.shape}')
-    data_out = np.zeros((npol, nchan, nrow), dtype=data_in.dtype)
-    for ipol in range(npol):
-        for irow in range(nrow):
-            _data_in = data_in[ipol, :, irow]
-            data_out[ipol, :, irow] = interpolate_data_single(
-                _data_in, cf_in, cf_out, sigma
-            )
+    n = min(nchan_in, round(sigma * 10))
+    # Ensure an odd number of channels for a symmetric zero-phase Gaussian kernel
+    if n % 2 == 0 and n + 1 <= nchan_in:
+        n += 1
+    gauss = gauss_normalized(n, sigma)
 
-    return data_out
+    # Reshape for vectorized convolution: (npol * nrow, nchan)
+    data_flat = data_in.transpose(0, 2, 1).reshape(-1, nchan_in)
+
+    # Vectorized smoothing using scipy.ndimage
+    # Set origin to align with symmetric filtering and eliminate any 1-sample shifts
+    origin = -1 if n % 2 == 0 else 0
+    smoothed_flat = convolve1d(
+        data_flat, gauss, axis=1, mode='constant', cval=0.0, origin=origin
+    )
+
+    # Create interpolator for all rows
+    interpolator = scipy.interpolate.interp1d(
+        cf_in, smoothed_flat, axis=1, bounds_error=False, fill_value=(smoothed_flat[:, 0], smoothed_flat[:, -1])
+    )
+    interpolated_flat = interpolator(cf_out)
+
+    # Add noise vectorized
+    diff_flat = data_flat - smoothed_flat
+    if robust:
+        noise_std = np.apply_along_axis(robust_stddev, 1, diff_flat).reshape(-1, 1)
+        noise_std_native = np.std(diff_flat, axis=1, keepdims=True)
+        logger.debug(
+            'native std %s robust std %s (channel-wise noise - median over chunk)',
+            np.median(noise_std_native),
+            np.median(noise_std),
+        )
+    else:
+        noise_std = np.std(diff_flat, axis=1, keepdims=True)
+    noise = np.random.default_rng().normal(0, noise_std, interpolated_flat.shape)
+    corrupted_flat = interpolated_flat + noise
+
+    # Reshape back to (npol, nchan_out, nrow)
+    return corrupted_flat.reshape(npol, nrow, nchan_out).transpose(0, 2, 1)
 
 
 def interpolate_bool(data_in, cf_in, cf_out):
@@ -477,8 +473,8 @@ class MainUpdater(TableUpdater):
     def columns(self):
         return self.__columns()
 
-    def taql(self, spw):
-        return f'DATA_DESC_ID == {self.ddid[spw]}'
+    def taql(self, ddid):
+        return f'DATA_DESC_ID == {ddid}'
 
     def __init__(
             self, vis: str, target_spws: list, freq_in: dict, freq_out: dict
@@ -488,20 +484,23 @@ class MainUpdater(TableUpdater):
         self.freq_in = freq_in
         self.freq_out = freq_out
 
+        self.dd_entries = []
         self.ddid = {}
         spw_ddid_map = get_spw_dd_map(self.vis)
-        for spw, ddids in spw_ddid_map.items():
-            if len(ddids) > 0:
+        for spw, ddids in sorted(spw_ddid_map.items()):
+            if len(ddids) > 0 and spw not in self.ddid:
                 self.ddid[spw] = ddids[0]
+            for ddid in ddids:
+                self.dd_entries.append((spw, ddid))
         self.all_spws = sorted(self.ddid.keys())
 
         self.tmp_vis = f'genwsusd.{vis}.tmp'
         self.backup_vis = f'genwsusd.{vis}.bak'
 
-    def _read_main(self, spw):
+    def _read_main(self, spw, ddid):
         nrow_chunk_default = 100
 
-        taql = self.taql(spw)
+        taql = self.taql(ddid)
         with sdutil.table_selector(self.vis, taql) as tb:
             nrow = tb.nrows()
             nchunk = nrow // nrow_chunk_default
@@ -512,7 +511,9 @@ class MainUpdater(TableUpdater):
 
             chunk_start = 0
             for i, nrow_chunk in enumerate(chunk_list):
-                logger.info(f'spw {spw}: start reading chunk {i}')
+                logger.info(
+                    'spw %d (ddid %d): start reading chunk %d', spw, ddid, i
+                )
 
                 data_in = dict(
                     (name, tb.getcol(name, chunk_start, nrow_chunk))
@@ -521,15 +522,17 @@ class MainUpdater(TableUpdater):
 
                 yield chunk_start, nrow_chunk, data_in
 
-                logger.info(f'spw {spw}: done reading chunk {i}')
+                logger.info(
+                    'spw %d (ddid %d): done reading chunk %d', spw, ddid, i
+                )
                 chunk_start += nrow_chunk
 
     def _get_chunk_updater(self, spw):
         if spw in self.target_spws:
-            logger.info(f'spw {spw}: update chunk')
+            logger.info('spw %d: update chunk', spw)
             return ChunkInterpolator(self.freq_in[spw], self.freq_out[spw])
         else:
-            logger.info(f'spw {spw}: leave input chunk as it is')
+            logger.info('spw %d: leave input chunk as it is', spw)
             return lambda x: x
 
     def read(self):
@@ -539,44 +542,59 @@ class MainUpdater(TableUpdater):
         copy_main_columns(self.vis, self.tmp_vis, ignore=self.columns)
 
         # create generators for lazy read
-        self.read_generators = [self._read_main(spw) for spw in self.all_spws]
+        self.read_generators = [
+            self._read_main(spw, ddid) for spw, ddid in self.dd_entries
+        ]
 
     def update(self):
         self.update_generators = [
             map(self._get_chunk_updater(spw), chunk)
-            for spw, chunk in enumerate(self.read_generators)
+            for (spw, ddid), chunk in zip(self.dd_entries, self.read_generators)
         ]
 
     def flush(self):
         # flush to the disk
-        for spw, update_gen in enumerate(self.update_generators):
-            logger.debug(f'spw {spw}: generator {update_gen}')
-            taql = self.taql(spw)
+        for (spw, ddid), update_gen in zip(self.dd_entries, self.update_generators):
+            logger.debug('spw %d (ddid %d): generator %s', spw, ddid, update_gen)
+            taql = self.taql(ddid)
             with sdutil.table_selector(
                 self.tmp_vis, taql, nomodify=False
             ) as tb:
-                i = 0
-                for chunk_start, nrow_chunk, data_out in update_gen:
-                    logger.info(f'spw {spw}: start writing chunk {i}')
+                for i, (chunk_start, nrow_chunk, data_out) in enumerate(update_gen):
+                    logger.info(
+                        'spw %d (ddid %d): start writing chunk %d', spw, ddid, i
+                    )
                     for column, chunk in data_out.items():
                         tb.putcol(column, chunk, chunk_start, nrow_chunk)
 
-                    logger.info(f'spw {spw}: done writing chunk {i}')
-                    i += 1
+                    logger.info(
+                        'spw %d (ddid %d): done writing chunk %d', spw, ddid, i
+                    )
 
         # finalization
         try:
             rename_table(self.vis, self.backup_vis)
-            rename_table(self.tmp_vis, self.vis)
-        except Exception as e:
+            try:
+                rename_table(self.tmp_vis, self.vis)
+            except Exception as e:
+                # If renaming tmp_vis fails, restore original MS from backup_vis
+                logger.error(
+                    'Failed to rename %s to %s: %s. Attempting to restore original MS.',
+                    self.tmp_vis, self.vis, e
+                )
+                if os.path.exists(self.backup_vis) and not os.path.exists(self.vis):
+                    rename_table(self.backup_vis, self.vis)
+                raise
+        except Exception:
             if os.path.exists(self.tmp_vis):
                 shutil.rmtree(self.tmp_vis)
             logger.error(
-                'Error during renaming. Resulting MS might be corrupted.'
+                'Error during table swapping. Original MS preserved if backup restoration succeeded.'
             )
-            raise e
+            raise
         finally:
-            if os.path.exists(self.backup_vis):
+            # Only remove backup if the destination MS exists safely on disk
+            if os.path.exists(self.backup_vis) and os.path.exists(self.vis):
                 shutil.rmtree(self.backup_vis)
 
 
